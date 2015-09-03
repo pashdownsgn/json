@@ -26,6 +26,10 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+//#include <strstream>
+#include <sstream>
+#include "rapidjson/internal/dtoa.h"
+#include "rapidjson/internal/itoa.h"
 
 /*!
 @brief namespace for Niels Lohmann
@@ -845,6 +849,34 @@ class basic_json
             return dump(false, 0);
         }
     }
+
+	/*!
+	 @brief serialization
+
+	 Serialization function for JSON objects. The function tries to mimick
+	 Python's @p json.dumps() function, and currently supports its @p indent
+	 parameter.
+
+	 @param indent  sif indent is nonnegative, then array elements and object
+	 members will be pretty-printed with that indent level. An indent level of 0
+	 will only insert newlines. -1 (the default) selects the most compact
+	 representation
+
+	 @see https://docs.python.org/2/library/json.html#json.dump
+	 */
+	inline string_t dump2(const int indent = -1) const noexcept
+	{
+		std::ostringstream oss;
+		if (indent >= 0)
+		{
+			dump2(oss, true, static_cast<unsigned int>(indent));
+		}
+		else
+		{
+			dump2(oss, false, 0);
+		}
+		return oss.str();
+	}
 
     /// return the type of the object (explicit)
     inline value_t type() const noexcept
@@ -2271,6 +2303,101 @@ class basic_json
     }
 
 
+	/*!
+	 @brief escape a string
+
+	 Escape a string by replacing certain special characters by a sequence of an
+	 escape character (backslash) and another character and other control
+	 characters by a sequence of "\u" followed by a four-digit hex
+	 representation.
+
+	 @param s  the string to escape
+	 @return escaped string
+	 */
+	static void escape_string2(std::ostringstream &oss, const string_t& s) noexcept
+	{
+#if 1
+		bool escape = false;
+		for (const auto c: s) if (c == '"' || c == '\\' || (c >= 0 && c <= 0x1F)) { escape = true; break; }
+		if (!escape) {
+			oss << s;
+			return;
+		}
+#endif
+
+		for (const auto c : s)
+		{
+			switch (c)
+			{
+					// quotation mark (0x22)
+				case '"':
+				{
+					oss << "\\\"";
+					break;
+				}
+
+					// reverse solidus (0x5c)
+				case '\\':
+				{
+					oss << "\\\\";
+					break;
+				}
+
+					// backspace (0x08)
+				case '\b':
+				{
+					oss << "\\b";
+					break;
+				}
+
+					// formfeed (0x0c)
+				case '\f':
+				{
+					oss << "\\f";
+					break;
+				}
+
+					// newline (0x0a)
+				case '\n':
+				{
+					oss << "\\n";
+					break;
+				}
+
+					// carriage return (0x0d)
+				case '\r':
+				{
+					oss << "\\r";
+					break;
+				}
+
+					// horizontal tab (0x09)
+				case '\t':
+				{
+					oss << "\\t";
+					break;
+				}
+
+				default:
+				{
+					if (c >= 0 and c <= 0x1f)
+					{
+						// control characters (everything between 0x00 and 0x1f)
+						// -> create four-digit hex representation
+						oss << "\\u" << std::hex << std::setw(4) << std::setfill('0') << int(c);
+					}
+					else
+					{
+						// all other characters are added as-is
+						oss << c;
+					}
+					break;
+				}
+			}
+		}
+	}
+
+
     /*!
     @brief internal implementation of the serialization function
 
@@ -2404,6 +2531,181 @@ class basic_json
             }
         }
     }
+
+
+	/*!
+	 @brief internal implementation of the serialization function
+
+	 This function is called by the public member function dump2 and organizes
+	 the serializaion internally. The indentation level is propagated as
+	 additional parameter. In case of arrays and objects, the function is called
+	 recursively. Note that
+
+	 - strings and object keys are escaped using escape_string2()
+	 - integer numbers are converted to a string using i64toa()
+	 - floating-point numbers are converted to a string using dtoa()
+
+	 @param prettyPrint    whether the output shall be pretty-printed
+	 @param indentStep     the indent level
+	 @param currentIndent  the current indent level (only used internally)
+	 */
+	inline void dump2(std::ostringstream &oss, const bool prettyPrint, const unsigned int indentStep,
+						 const unsigned int currentIndent = 0) const noexcept
+	{
+		// variable to hold indentation for recursive calls
+		auto new_indent = currentIndent;
+
+		// helper function to return whitespace as indentation
+		const auto indent = [prettyPrint, &new_indent]()
+		{
+			return prettyPrint ? string_t(new_indent, ' ') : string_t();
+		};
+
+		switch (m_type)
+		{
+			case (value_t::object):
+			{
+				if (m_value.object->empty())
+				{
+					oss << "{}";
+					return;
+				}
+
+				oss << '{';
+
+				const char *endl = ",";
+				std::string p = indent() + '"';
+				const char *prefix = p.c_str();
+				const char *sep = "\":";
+
+				// increase indentation
+				if (prettyPrint)
+				{
+					new_indent += indentStep;
+					endl = ",\n";
+					p = indent() + '"';
+					prefix = p.c_str();
+					sep = "\": ";
+					oss << '\n';
+				}
+
+				for (auto i = m_value.object->cbegin(); i != m_value.object->cend(); ++i)
+				{
+					if (i != m_value.object->cbegin())
+					{
+						oss << endl;
+					}
+					oss << prefix;
+					escape_string2(oss, i->first);
+					oss << sep;
+					i->second.dump2(oss, prettyPrint, indentStep, new_indent);
+				}
+
+				// decrease indentation
+				if (prettyPrint)
+				{
+					new_indent -= indentStep;
+					oss << '\n';
+				}
+
+				oss << indent() << '}';
+				return;
+			}
+
+			case (value_t::array):
+			{
+				if (m_value.array->empty())
+				{
+					oss << "[]";
+					return;
+				}
+
+				oss << '[';
+
+				const char *endl = ",";
+				std::string p = indent();
+				const char *prefix = p.c_str();
+
+				// increase indentation
+				if (prettyPrint)
+				{
+					new_indent += indentStep;
+					endl = ",\n";
+					p = indent();
+					prefix = p.c_str();
+					oss << '\n';
+				}
+
+				for (auto i = m_value.array->cbegin(); i != m_value.array->cend(); ++i)
+				{
+					if (i != m_value.array->cbegin())
+					{
+						oss << endl;
+					}
+					oss << prefix;
+					i->dump2(oss, prettyPrint, indentStep, new_indent);
+				}
+
+				// decrease indentation
+				if (prettyPrint)
+				{
+					new_indent -= indentStep;
+					oss << '\n';
+				}
+
+				oss << indent() << ']';
+				return;
+			}
+
+			case (value_t::string):
+			{
+				oss << '"';
+				escape_string2(oss, *m_value.string);
+				oss << '"';
+				return;
+			}
+
+			case (value_t::boolean):
+			{
+				oss << (m_value.boolean ? "true" : "false");
+				return;
+			}
+
+			case (value_t::number_integer):
+			{
+#if 0
+				oss << std::to_string(m_value.number_integer);
+#else
+				static char buffer[256];
+				*rapidjson::internal::i64toa(m_value.number_integer, buffer) = '\0';
+				oss << buffer;
+#endif
+				return;
+			}
+
+			case (value_t::number_float):
+			{
+#if 0
+				// 15 digits of precision allows round-trip IEEE 754
+				// string->double->string
+				const auto sz = static_cast<unsigned int>(std::snprintf(nullptr, 0, "%.15g", m_value.number_float));
+				std::vector<typename string_t::value_type> buf(sz + 1);
+				std::snprintf(&buf[0], buf.size(), "%.15g", m_value.number_float);
+				oss << buf.data();
+#else
+				static char buffer[256];
+				*rapidjson::internal::dtoa(m_value.number_float, buffer) = '\0';
+				oss << buffer;
+#endif
+				return;
+			}
+
+			default:
+			{
+				oss << "null";
+			}
+		}
+	}
 
     /// "equality" comparison for floating point numbers
     template<typename T>
